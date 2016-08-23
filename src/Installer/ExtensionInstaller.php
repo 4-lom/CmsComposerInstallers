@@ -39,6 +39,16 @@ class ExtensionInstaller implements InstallerInterface
     protected $extensionDir;
 
     /**
+     * @var string
+     */
+    protected $extensionLinkDir;
+
+    /**
+     * @var IOInterface
+     */
+    protected $io;
+
+    /**
      * @var Composer
      */
     protected $composer;
@@ -72,6 +82,7 @@ class ExtensionInstaller implements InstallerInterface
      */
     public function __construct(IOInterface $io, Composer $composer, Filesystem $filesystem, Config $pluginConfig, BinaryInstaller $binaryInstaller)
     {
+    	$this->io = $io;
         $this->composer = $composer;
         $this->downloadManager = $composer->getDownloadManager();
 
@@ -80,8 +91,13 @@ class ExtensionInstaller implements InstallerInterface
         $this->pluginConfig = $pluginConfig;
         if ($pluginConfig->get('extensions-in-vendor-dir')) {
             $this->extensionDir = $this->filesystem->normalizePath($pluginConfig->get('vendor-dir'));
+	        $this->extensionLinkDir = $this->filesystem->normalizePath($pluginConfig->get('config-dir')) . '/ext';
         } else {
             $this->extensionDir = $this->filesystem->normalizePath($pluginConfig->get('config-dir')) . '/ext';
+        }
+
+        if(!is_dir($this->extensionLinkDir ?: $this->extensionDir)) {
+        	mkdir($this->extensionLinkDir ?: $this->extensionDir, 0775, true);
         }
     }
 
@@ -124,6 +140,7 @@ class ExtensionInstaller implements InstallerInterface
             $this->binaryInstaller->removeBinaries($package);
         }
         $this->installCode($package);
+	    $this->installSymlink($package);
         $this->binaryInstaller->installBinaries($package, $downloadPath);
         if (!$repo->hasPackage($package)) {
             $repo->addPackage(clone $package);
@@ -146,6 +163,7 @@ class ExtensionInstaller implements InstallerInterface
         }
         $this->binaryInstaller->removeBinaries($initial);
         $this->updateCode($initial, $target);
+	    $this->updateSymlink($target);
         $this->binaryInstaller->installBinaries($target, $this->getInstallPath($target));
         $repo->removePackage($initial);
         if (!$repo->hasPackage($target)) {
@@ -168,25 +186,37 @@ class ExtensionInstaller implements InstallerInterface
         }
 
         $this->removeCode($package);
+	    $this->removeSymlink($package);
         $this->binaryInstaller->removeBinaries($package);
         $repo->removePackage($package);
     }
 
-    /**
-     * Returns the installation path of a package
-     *
-     * @param PackageInterface $package
-     * @return string path
-     */
-    public function getInstallPath(PackageInterface $package)
-    {
-        if ($this->pluginConfig->get('extensions-in-vendor-dir')) {
-            $extensionInstallDir = $package->getName();
-        } else {
-            $extensionInstallDir = $this->resolveExtensionKey($package);
-        }
-        return $this->extensionDir . DIRECTORY_SEPARATOR . $extensionInstallDir;
-    }
+	/**
+	 * Returns the installation path of a package
+	 *
+	 * @param PackageInterface $package
+	 * @return string path
+	 */
+	public function getInstallPath(PackageInterface $package)
+	{
+		if ($this->pluginConfig->get('extensions-in-vendor-dir')) {
+			$extensionInstallDir = $package->getName();
+		} else {
+			$extensionInstallDir = $this->resolveExtensionKey($package);
+		}
+		return $this->extensionDir . DIRECTORY_SEPARATOR . $extensionInstallDir;
+	}
+
+	/**
+	 * Returns the link path of a package
+	 *
+	 * @param PackageInterface $package
+	 * @return string path
+	 */
+	public function getLinkPath(PackageInterface $package)
+	{
+		return $this->extensionLinkDir . DIRECTORY_SEPARATOR . $this->resolveExtensionKey($package);
+	}
 
     /**
      * Resolves the extension key from replaces or package name
@@ -217,6 +247,14 @@ class ExtensionInstaller implements InstallerInterface
         $this->downloadManager->download($package, $this->getInstallPath($package));
     }
 
+	/**
+	 * @param PackageInterface $package
+	 */
+    protected function installSymlink(PackageInterface $package)
+    {
+	    $this->updateSymlink($package);
+    }
+
     /**
      * @param PackageInterface $initial
      * @param PackageInterface $target
@@ -242,6 +280,37 @@ class ExtensionInstaller implements InstallerInterface
         $this->downloadManager->update($initial, $target, $targetDownloadPath);
     }
 
+	/**
+	 * @param PackageInterface $package
+	 */
+	protected function updateSymlink(PackageInterface $package)
+	{
+		if ($this->pluginConfig->get('extensions-in-vendor-dir')) {
+			$linkPath = $this->getLinkPath($package);
+			if(is_link($linkPath)) {
+				// In case of a broken link or a wrong path, we will remove the link and add a new one!
+				if(file_exists($linkPath) == false || realpath(readlink($linkPath)) != $this->getInstallPath($package)) {
+					$this->io->write("\033[2A"); // Move the cursor, for better readability
+					$this->removeSymlink($package);
+				} else {
+					// Nothing to do, the symlink is valid and up-to-date
+					return;
+				}
+			} elseif(file_exists($linkPath)) {
+				// "Error" case
+				$this->io->write("\033[2A"); // Move the cursor, for better readability
+				$this->io->writeError(sprintf('<error>    Cannot symlink to ./%s, path allready exists!</error>', str_replace(realpath(getenv("PWD")) . DIRECTORY_SEPARATOR, "", $linkPath)), true);
+				$this->io->writeError('');
+				return;
+			}
+			$this->filesystem->symlink($this->getInstallPath($package), $linkPath);
+
+			$this->io->write("\033[2A"); // Move the cursor, for better readability
+			$this->io->writeError(sprintf('    Symlinked to ./%s', str_replace(realpath(getenv("PWD")) . DIRECTORY_SEPARATOR, "", $linkPath)), true);
+			$this->io->writeError('');
+		}
+	}
+
     /**
      * @param PackageInterface $package
      */
@@ -249,4 +318,19 @@ class ExtensionInstaller implements InstallerInterface
     {
         $this->downloadManager->remove($package, $this->getInstallPath($package));
     }
+
+	/**
+	 * @param PackageInterface $package
+	 */
+	protected function removeSymlink(PackageInterface $package)
+	{
+		if ($this->pluginConfig->get('extensions-in-vendor-dir')) {
+			$linkPath = $this->getLinkPath($package);
+			if(is_link($linkPath)) {
+				// ->remove doesn't works on broken links, cause of a file_exists check!
+				$this->filesystem->unlink($linkPath);
+				$this->io->writeError(sprintf('    Unlinked from ./%s', str_replace(realpath(getenv("PWD")) . DIRECTORY_SEPARATOR, "", $linkPath)));
+			}
+		}
+	}
 }
