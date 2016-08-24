@@ -109,6 +109,7 @@ class ExtensionInstaller implements InstallerInterface
      */
     public function supports($packageType)
     {
+	    $this->io->writeError("   PackageType: " . $packageType);
         return $packageType !== 'typo3-cms-core'
             && strncmp('typo3-cms-', $packageType, 10) === 0;
     }
@@ -287,9 +288,17 @@ class ExtensionInstaller implements InstallerInterface
 	{
 		if ($this->pluginConfig->get('extensions-in-vendor-dir')) {
 			$linkPath = $this->getLinkPath($package);
+			$linkSource = $this->getInstallPath($package);
+			if(is_link($linkSource)) {
+				$linkSource = $this->filesystem->normalizePath(substr($linkSource, 0, strlen(basename($linkSource)) * -1) . $this->filesystem->normalizePath(readlink($linkSource)));
+			}
 			if(is_link($linkPath)) {
+				$linkTarget = readlink($linkPath);
+				if(!$this->filesystem->isAbsolutePath($linkTarget)) {
+					$linkTarget = $this->filesystem->normalizePath(substr($linkPath, 0, strlen(basename($linkPath)) * -1) . $this->filesystem->normalizePath($linkTarget));
+				}
 				// In case of a broken link or a wrong path, we will remove the link and add a new one!
-				if(file_exists($linkPath) == false || realpath(readlink($linkPath)) != $this->getInstallPath($package)) {
+				if(file_exists($linkPath) == false || $linkTarget != $linkSource) {
 					$this->io->write("\033[2A"); // Move the cursor, for better readability
 					$this->removeSymlink($package);
 				} else {
@@ -303,7 +312,7 @@ class ExtensionInstaller implements InstallerInterface
 				$this->io->writeError('');
 				return;
 			}
-			$this->filesystem->symlink($this->getInstallPath($package), $linkPath);
+			$this->filesystem->symlink($linkSource, $linkPath);
 
 			$this->io->write("\033[2A"); // Move the cursor, for better readability
 			$this->io->writeError(sprintf('    Symlinked to ./%s', str_replace(realpath(getenv("PWD")) . DIRECTORY_SEPARATOR, "", $linkPath)), true);
